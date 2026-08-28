@@ -22,7 +22,7 @@ class PatientQrApi {
   }
 
   /// Submit a help request
-  static Future<void> sendHelpRequest(String sessionId, String type, {String? note}) async {
+  static Future<Map<String, dynamic>> sendHelpRequest(String sessionId, String type, {String? note}) async {
     final Map<String, dynamic> body = {
       'bed_qr_session_id': sessionId,
       'type': type,
@@ -30,6 +30,22 @@ class PatientQrApi {
     if (note != null && note.isNotEmpty) {
       body['note'] = note;
     }
-    await ApiClient.post('/public/help-requests', body: body);
+    final res = await ApiClient.post('/public/help-requests', body: body);
+    if (res is! Map) {
+      throw ApiException(500, 'Unexpected help request response');
+    }
+    return Map<String, dynamic>.from(res);
+  }
+
+  /// Get the latest request for this QR session so the patient can track it.
+  static Future<Map<String, dynamic>?> fetchLatestHelpRequest(String sessionId) async {
+    final res = await ApiClient.get(
+      '/public/help-requests/latest?bed_qr_session_id=${Uri.encodeQueryComponent(sessionId)}',
+    );
+    if (res == null) return null;
+    if (res is! Map) {
+      throw ApiException(500, 'Unexpected help request status response');
+    }
+    return Map<String, dynamic>.from(res);
   }
 }

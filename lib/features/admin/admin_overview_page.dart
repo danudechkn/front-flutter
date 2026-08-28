@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../nurse_queue/nurse_queue_api.dart';
 import '../nurse_queue/request_detail_page.dart';
 import '../bed_qr/bed_qr_management_page.dart';
+import '../patient_qr/help_request_realtime.dart';
 
 class AdminOverviewPage extends StatefulWidget {
   const AdminOverviewPage({super.key});
@@ -25,18 +26,17 @@ class _AdminOverviewPageState extends State<AdminOverviewPage> {
   bool _isLoadingRequests = false;
   bool _isLoadingBeds = false;
 
-  Timer? _refreshTimer;
+  StreamSubscription<Map<String, dynamic>>? _realtimeSubscription;
 
   @override
   void initState() {
     super.initState();
     _fetchWards();
-    _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) => _fetchAll());
   }
 
   @override
   void dispose() {
-    _refreshTimer?.cancel();
+    _realtimeSubscription?.cancel();
     super.dispose();
   }
 
@@ -51,6 +51,7 @@ class _AdminOverviewPageState extends State<AdminOverviewPage> {
         }
       });
       await _fetchAll();
+      _subscribeToRealtimeUpdates();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -59,6 +60,14 @@ class _AdminOverviewPageState extends State<AdminOverviewPage> {
     } finally {
       if (mounted) setState(() => _isLoadingWards = false);
     }
+  }
+
+  void _subscribeToRealtimeUpdates() {
+    _realtimeSubscription?.cancel();
+    _realtimeSubscription = HelpRequestRealtime.watchAdmin().listen(
+      (_) => _fetchAll(),
+      onError: (Object error) => debugPrint('Overview realtime error: $error'),
+    );
   }
 
   Future<void> _fetchAll() async {

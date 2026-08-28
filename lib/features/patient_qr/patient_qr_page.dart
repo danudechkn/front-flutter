@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../core/api/api_client.dart';
 import 'patient_qr_api.dart';
 import 'help_request_sheet.dart';
+import 'help_request_realtime.dart';
 
 class PatientQrPage extends StatefulWidget {
   final String qrToken;
@@ -29,11 +31,20 @@ class _PatientQrPageState extends State<PatientQrPage> {
   final Color _bgGray = const Color(0xFFF8F9FA);
 
   List<dynamic> _contents = [];
+  Map<String, dynamic>? _latestHelpRequest;
+  StreamSubscription<Map<String, dynamic>>? _requestStatusSubscription;
+  bool _isSendingHelpRequest = false;
 
   @override
   void initState() {
     super.initState();
     _initData();
+  }
+
+  @override
+  void dispose() {
+    _requestStatusSubscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _initData() async {
@@ -63,6 +74,9 @@ class _PatientQrPageState extends State<PatientQrPage> {
         final firstname = patient['firstname'] ?? patient['firstName'] ?? '';
         final lastname = patient['lastname'] ?? patient['lastName'] ?? '';
         _patientName = '$prename$firstname $lastname'.trim();
+
+        await _loadLatestHelpRequest();
+        _subscribeToHelpRequestStatus();
 
         final locationId = session['locationid'];
         if (locationId != null) {
@@ -95,8 +109,40 @@ class _PatientQrPageState extends State<PatientQrPage> {
     }
   }
 
+  Future<void> _loadLatestHelpRequest() async {
+    final sessionId = _sessionData?['id']?.toString();
+    if (sessionId == null || sessionId.isEmpty) return;
+
+    try {
+      final request = await PatientQrApi.fetchLatestHelpRequest(sessionId);
+      if (mounted) setState(() => _latestHelpRequest = request);
+    } catch (e) {
+      // The patient can still ask for help if the status refresh is unavailable.
+      debugPrint('Help request status fetch error: $e');
+    }
+  }
+
+  void _subscribeToHelpRequestStatus() {
+    final sessionId = _sessionData?['id']?.toString();
+    if (sessionId == null || sessionId.isEmpty) return;
+
+    _requestStatusSubscription?.cancel();
+    _requestStatusSubscription = HelpRequestRealtime.watch(sessionId).listen(
+      (request) {
+        if (mounted) setState(() => _latestHelpRequest = request);
+      },
+      onError: (Object error) => debugPrint('Realtime status error: $error'),
+    );
+  }
+
+  bool get _hasOpenHelpRequest {
+    final status = _latestHelpRequest?['status'];
+    return status == 'NEW' || status == 'ACKNOWLEDGED' || status == 'IN_PROGRESS';
+  }
+
   Future<void> _sendHelpRequest(String type, {String? note}) async {
-    if (_sessionData == null) return;
+    if (_sessionData == null || _hasOpenHelpRequest || _isSendingHelpRequest) return;
+    setState(() => _isSendingHelpRequest = true);
     
     showDialog(
       context: context,
@@ -105,10 +151,15 @@ class _PatientQrPageState extends State<PatientQrPage> {
     );
 
     try {
-      await PatientQrApi.sendHelpRequest(_sessionData!['id'], type, note: note);
+      final request = await PatientQrApi.sendHelpRequest(
+        _sessionData!['id'].toString(),
+        type,
+        note: note,
+      );
       
       if (!mounted) return;
       Navigator.pop(context); // Close loading
+      setState(() => _latestHelpRequest = request);
       
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -120,12 +171,25 @@ class _PatientQrPageState extends State<PatientQrPage> {
     } catch (e) {
       if (!mounted) return;
       Navigator.pop(context); // Close loading
+      if (e is ApiException && e.statusCode == 409) {
+        await _loadLatestHelpRequest();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('มีคำขอที่กำลังดำเนินการอยู่แล้ว'),
+            backgroundColor: Color(0xFFDD6B20),
+          ),
+        );
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('ส่งคำร้องไม่สำเร็จ: $e'),
           backgroundColor: Colors.red,
         ),
       );
+    } finally {
+      if (mounted) setState(() => _isSendingHelpRequest = false);
     }
   }
 
@@ -236,6 +300,10 @@ class _PatientQrPageState extends State<PatientQrPage> {
                 ),
                 const SizedBox(height: 16),
                 _buildActionButtons(),
+                if (_latestHelpRequest != null) ...[
+                  const SizedBox(height: 24),
+                  _buildLatestRequestCard(),
+                ],
                 const SizedBox(height: 24),
                     ],
                   ),
@@ -346,16 +414,23 @@ class _PatientQrPageState extends State<PatientQrPage> {
   }
 
   Widget _buildActionButtons() {
+    final disabled = _hasOpenHelpRequest || _isSendingHelpRequest;
     return Column(
       children: [
         Row(
           children: [
             Expanded(
-              child: _buildSecondaryButton('เข้าห้องน้ำ', () => _sendHelpRequest('TOILET')),
+              child: _buildSecondaryButton(
+                'เข้าห้องน้ำ',
+                disabled ? null : () => _sendHelpRequest('TOILET'),
+              ),
             ),
         const SizedBox(width: 12),
             Expanded(
-              child: _buildSecondaryButton('สอบถามเรื่องยา', () => _sendHelpRequest('MEDICATION_QUESTION')),
+              child: _buildSecondaryButton(
+                'สอบถามเรื่องยา',
+                disabled ? null : () => _sendHelpRequest('MEDICATION_QUESTION'),
+              ),
             ),
           ],
         ),
@@ -364,7 +439,7 @@ class _PatientQrPageState extends State<PatientQrPage> {
           width: double.infinity,
           height: 64,
           child: ElevatedButton(
-            onPressed: () => _sendHelpRequest('PAIN'),
+            onPressed: disabled ? null : () => _sendHelpRequest('PAIN'),
             style: ElevatedButton.styleFrom(
               backgroundColor: _primaryTeal,
               foregroundColor: Colors.white,
@@ -379,7 +454,7 @@ class _PatientQrPageState extends State<PatientQrPage> {
           width: double.infinity,
           height: 50,
           child: OutlinedButton(
-            onPressed: () {
+            onPressed: disabled ? null : () {
               HelpRequestSheet.show(context, (type, note) {
                 _sendHelpRequest(type, note: note);
               });
@@ -396,7 +471,7 @@ class _PatientQrPageState extends State<PatientQrPage> {
     );
   }
 
-  Widget _buildSecondaryButton(String label, VoidCallback onPressed) {
+  Widget _buildSecondaryButton(String label, VoidCallback? onPressed) {
     return SizedBox(
       height: 56,
       child: ElevatedButton(
@@ -410,5 +485,94 @@ class _PatientQrPageState extends State<PatientQrPage> {
         child: Text(label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
       ),
     );
+  }
+
+  Widget _buildLatestRequestCard() {
+    final request = _latestHelpRequest!;
+    final status = request['status']?.toString() ?? '';
+    final type = request['type']?.toString() ?? '';
+    final isFinished = status == 'RESOLVED' || status == 'CANCELLED';
+    final color = _requestStatusColor(status);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            isFinished ? Icons.check_circle_outline : Icons.access_time_filled,
+            color: color,
+            size: 28,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('คำขอล่าสุด', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 4),
+                Text(
+                  '${_requestTypeLabel(type)} · ${_requestStatusLabel(status)}',
+                  style: TextStyle(color: color, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _requestStatusDescription(status),
+                  style: const TextStyle(color: Color(0xFF4A5568), height: 1.35),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _requestTypeLabel(String type) {
+    switch (type) {
+      case 'PAIN': return 'แจ้งปวด / ไม่สบาย';
+      case 'TOILET': return 'ขอเข้าห้องน้ำ';
+      case 'MEDICATION_QUESTION': return 'สอบถามเรื่องยา';
+      default: return 'ขอความช่วยเหลือ';
+    }
+  }
+
+  String _requestStatusLabel(String status) {
+    switch (status) {
+      case 'NEW': return 'ส่งคำขอแล้ว';
+      case 'ACKNOWLEDGED': return 'พยาบาลรับเรื่องแล้ว';
+      case 'IN_PROGRESS': return 'พยาบาลกำลังดำเนินการ';
+      case 'RESOLVED': return 'ดำเนินการเรียบร้อย';
+      case 'CANCELLED': return 'คำขอถูกยกเลิก';
+      default: return 'กำลังตรวจสอบสถานะ';
+    }
+  }
+
+  String _requestStatusDescription(String status) {
+    switch (status) {
+      case 'NEW': return 'พยาบาลจะเห็นคำขอของคุณในไม่ช้า';
+      case 'ACKNOWLEDGED': return 'พยาบาลรับทราบแล้ว กรุณารอสักครู่';
+      case 'IN_PROGRESS': return 'พยาบาลกำลังช่วยเหลือคุณ';
+      case 'RESOLVED': return 'หากยังต้องการความช่วยเหลือ สามารถส่งคำขอใหม่ได้';
+      case 'CANCELLED': return 'หากยังต้องการความช่วยเหลือ สามารถส่งคำขอใหม่ได้';
+      default: return '';
+    }
+  }
+
+  Color _requestStatusColor(String status) {
+    switch (status) {
+      case 'NEW': return const Color(0xFFDD6B20);
+      case 'ACKNOWLEDGED': return const Color(0xFF2B6CB0);
+      case 'IN_PROGRESS': return _primaryTeal;
+      case 'RESOLVED': return const Color(0xFF276749);
+      case 'CANCELLED': return const Color(0xFF718096);
+      default: return const Color(0xFF718096);
+    }
   }
 }

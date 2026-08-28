@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'nurse_queue_api.dart';
 import 'request_detail_page.dart';
+import '../patient_qr/help_request_realtime.dart';
 
 class NurseQueuePage extends StatefulWidget {
   final bool embedded;
@@ -25,7 +26,7 @@ class _NurseQueuePageState extends State<NurseQueuePage> {
   // null = ทั้งหมด
   String? _statusFilter;
 
-  Timer? _refreshTimer;
+  StreamSubscription<Map<String, dynamic>>? _realtimeSubscription;
 
   final List<({String? value, String label, Color color})> _statusOptions = [
     (value: null, label: 'ทั้งหมด', color: Color(0xFF4A5568)),
@@ -39,15 +40,11 @@ class _NurseQueuePageState extends State<NurseQueuePage> {
   void initState() {
     super.initState();
     _fetchWards();
-    // Auto-refresh every 30 seconds
-    _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (_selectedWard != null) _fetchRequests();
-    });
   }
 
   @override
   void dispose() {
-    _refreshTimer?.cancel();
+    _realtimeSubscription?.cancel();
     super.dispose();
   }
 
@@ -60,6 +57,7 @@ class _NurseQueuePageState extends State<NurseQueuePage> {
         if (wards.isNotEmpty) {
           _selectedWard = wards.first;
           _fetchRequests();
+          _subscribeToRealtimeUpdates();
         }
       });
     } catch (e) {
@@ -70,6 +68,14 @@ class _NurseQueuePageState extends State<NurseQueuePage> {
     } finally {
       if (mounted) setState(() => _isLoadingWards = false);
     }
+  }
+
+  void _subscribeToRealtimeUpdates() {
+    _realtimeSubscription?.cancel();
+    _realtimeSubscription = HelpRequestRealtime.watchAdmin().listen(
+      (_) => _fetchRequests(),
+      onError: (Object error) => debugPrint('Nurse queue realtime error: $error'),
+    );
   }
 
   Future<void> _fetchRequests() async {
@@ -236,8 +242,8 @@ class _NurseQueuePageState extends State<NurseQueuePage> {
                   isExpanded: true,
                   items: _wards.map((w) => DropdownMenuItem(value: w, child: Text(_wardName(w)))).toList(),
                   onChanged: (w) {
-                    setState(() => _selectedWard = w);
-                    _fetchRequests();
+                  setState(() => _selectedWard = w);
+                  _fetchRequests();
                   },
                 ),
               ),
